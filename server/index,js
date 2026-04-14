@@ -27,9 +27,9 @@ const MEDIA_CODECS = [
   },
 ];
 
-const ANNOUNCED_IP = process.env.ANNOUNCED_IP || '127.0.0.1';
-const RTC_MIN_PORT = parseInt(process.env.RTC_MIN_PORT || '10000');
-const RTC_MAX_PORT = parseInt(process.env.RTC_MAX_PORT || '10100');
+const ANNOUNCED_IP = process.env.ANNOUNCED_IP || '3.70.42.97';
+const RTC_MIN_PORT = parseInt(process.env.RTC_MIN_PORT || '40000');
+const RTC_MAX_PORT = parseInt(process.env.RTC_MAX_PORT || '49999');
 
 const WEBRTC_TRANSPORT_OPTIONS = {
   listenIps: [{ ip: '0.0.0.0', announcedIp: ANNOUNCED_IP }],
