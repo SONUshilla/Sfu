@@ -6,7 +6,7 @@ services:
     container_name: backend
     ports:
       - "5000:5000"
-      - "10000-10100:10000-10100/udp"
+      - "40000-49999:40000-49999/udp"
     restart: unless-stopped
     env_file:
       - ./server/.env
