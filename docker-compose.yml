@@ -1,0 +1,25 @@
+services:
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: backend
+    ports:
+      - "5000:5000"
+      - "10000-10100:10000-10100/udp"
+    restart: unless-stopped
+    env_file:
+      - ./server/.env
+
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    env_file:
+      - ./client/.env

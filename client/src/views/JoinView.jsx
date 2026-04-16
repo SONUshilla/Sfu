@@ -51,7 +51,7 @@ export default function JoinView({ onJoin }) {
         }}
       />
       {/* Radial glow */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[700px] rounded-full bg-accent/4 blur-[120px] pointer-events-none" />
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-175 h-175 rounded-full bg-accent/4 blur-[120px] pointer-events-none" />
 
       <div className="relative z-10 w-full max-w-md animate-slide_up">
         {/* Brand */}

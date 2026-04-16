@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import socket from '../socket';
-import { useMediasoup } from '../hooks/usemediasoup';
+import { useMediasoup } from '../hooks/useMediasoup';
 
 /**
  * ─── CONSTANTS & CONFIG ──────────────────────────────────────────────────────
