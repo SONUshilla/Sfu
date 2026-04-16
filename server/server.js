@@ -1,10 +1,12 @@
 'use strict';
-
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const mediasoup = require('mediasoup');
 const cors = require('cors');
+import dotenv from 'dotenv';
+dotenv.config();
+
 
 // ─── App Setup ────────────────────────────────────────────────────────────────
 const app = express();
