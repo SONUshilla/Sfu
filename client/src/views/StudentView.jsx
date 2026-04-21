@@ -36,17 +36,15 @@ export default function StudentView({ sessionInfo, onLeave }) {
 
   const webcamStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
-  const producersRef = useRef({}); // { webcam, audio, screen }
+  const producersRef = useRef({}); 
 
   const { loadDevice, createSendTransport, produce } = useMediasoup();
 
-  // ── Init: join + setup transport + produce media ─────────────────────────────
   useEffect(() => {
     let mounted = true;
 
     async function init() {
       try {
-        // 1. Connect socket & join
         socket.connect();
         const joinData = await new Promise((res, rej) => {
           socket.emit('join', { sessionId, role: 'student', name }, (d) =>
@@ -56,13 +54,9 @@ export default function StudentView({ sessionInfo, onLeave }) {
 
         if (!mounted) return;
 
-        // 2. Load mediasoup Device with router capabilities
         await loadDevice(joinData.routerRtpCapabilities);
-
-        // 3. Create send transport
         await createSendTransport();
 
-        // 4. Acquire webcam + mic
         const camStream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
           audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
@@ -71,31 +65,41 @@ export default function StudentView({ sessionInfo, onLeave }) {
         if (!mounted) { camStream.getTracks().forEach((t) => t.stop()); return; }
 
         webcamStreamRef.current = camStream;
-        if (webcamVideoRef.current) {
-          webcamVideoRef.current.srcObject = camStream;
-        }
+        if (webcamVideoRef.current) webcamVideoRef.current.srcObject = camStream;
 
-        // 5. Produce webcam video
         const [videoTrack] = camStream.getVideoTracks();
+        const [audioTrack] = camStream.getAudioTracks();
+
+        // Hardware unplug listeners
+        videoTrack.onended = () => {
+          if (!mounted) return;
+          setError('Camera disconnected physically or access was revoked.');
+          setStatus(STATUS.ERROR);
+          setTracks((t) => ({ ...t, webcam: false }));
+        };
+
+        audioTrack.onended = () => {
+          if (!mounted) return;
+          setError('Microphone disconnected.');
+          setTracks((t) => ({ ...t, audio: false }));
+        };
+
         producersRef.current.webcam = await produce(videoTrack, {
           mediaType: "webcam",
-          encodings: [{ maxBitrate: 100000 }],
+          encodings: [{ maxBitrate: 200000 }], 
         });
         if (mounted) setTracks((t) => ({ ...t, webcam: true }));
 
-        // 6. Produce audio
-        const [audioTrack] = camStream.getAudioTracks();
         producersRef.current.audio = await produce(audioTrack, { mediaType: 'audio' });
         if (mounted) setTracks((t) => ({ ...t, audio: true }));
 
         if (mounted) setStatus(STATUS.CONNECTED);
 
-        // 7. Start screen share (ask user)
         await startScreenShare(mounted);
       } catch (err) {
         if (!mounted) return;
         console.error('Student init error:', err);
-        setError(err.message || 'Failed to initialize');
+        setError(err.message || 'Failed to initialize media');
         setStatus(STATUS.ERROR);
       }
     }
@@ -103,60 +107,44 @@ export default function StudentView({ sessionInfo, onLeave }) {
     async function startScreenShare(mounted) {
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            frameRate: { ideal: 15 },
-          },
+          video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 15 } },
           audio: false,
         });
 
-        if (!mounted) {
-          screenStream.getTracks().forEach((t) => t.stop());
-          return;
-        }
+        if (!mounted) { screenStream.getTracks().forEach((t) => t.stop()); return; }
 
         screenStreamRef.current = screenStream;
-        if (screenVideoRef.current) {
-          screenVideoRef.current.srcObject = screenStream;
-        }
+        if (screenVideoRef.current) screenVideoRef.current.srcObject = screenStream;
 
         const [screenTrack] = screenStream.getVideoTracks();
+        screenTrack.addEventListener("ended", stopScreenShare);
 
-        // If user stops share via browser UI
-        screenTrack.addEventListener("ended", () => {
-          stopScreenShare();
-        });
-
-        producersRef.current.webcam = await produce(screenTrack, {
+        producersRef.current.screen = await produce(screenTrack, {
           mediaType: "screen",
-          encodings: [{ maxBitrate: 100000 }],
+          encodings: [{ maxBitrate: 300000 }],
         });
         if (mounted) setTracks((t) => ({ ...t, screen: true }));
       } catch (e) {
-        // User cancelled screen share — not a hard error
         console.warn('Screen share not started:', e.message);
       }
     }
 
     init();
 
-    // ── Socket events ──────────────────────────────────────────────────────────
-    const onPeerJoined = ({ role }) => {
-      if (role === 'proctor') setProctorCount((n) => n + 1);
-    };
-    const onPeerLeft = () => {
-      // Recount proctors from server isn't trivial here; just decrement safely
-      setProctorCount((n) => Math.max(0, n - 1));
+    const onDisconnect = () => {
+      setStatus(STATUS.ERROR);
+      setError('Connection to server lost. Attempting to reconnect...');
     };
 
-    socket.on('peerJoined', onPeerJoined);
-    socket.on('peerLeft', onPeerLeft);
+    socket.on('peerJoined', ({ role }) => { if (role === 'proctor') setProctorCount((n) => n + 1); });
+    socket.on('peerLeft', () => setProctorCount((n) => Math.max(0, n - 1)));
+    socket.on('disconnect', onDisconnect);
 
     return () => {
       mounted = false;
-      socket.off('peerJoined', onPeerJoined);
-      socket.off('peerLeft', onPeerLeft);
+      socket.off('peerJoined');
+      socket.off('peerLeft');
+      socket.off('disconnect');
       cleanup();
     };
   }, []); // eslint-disable-line
@@ -204,7 +192,6 @@ export default function StudentView({ sessionInfo, onLeave }) {
 
   return (
     <div className="min-h-screen bg-surface flex flex-col">
-      {/* Top bar */}
       <header className="flex items-center justify-between px-6 py-4 border-b border-surface-3 bg-surface-1">
         <div className="flex items-center gap-3">
           <span className="w-2 h-2 rounded-full bg-accent animate-pulse_slow" />
@@ -236,9 +223,7 @@ export default function StudentView({ sessionInfo, onLeave }) {
         </div>
       </header>
 
-      {/* Main */}
       <main className="flex-1 flex flex-col lg:flex-row gap-5 p-6">
-        {/* Webcam preview */}
         <div className="flex-1 flex flex-col gap-3">
           <div className="flex items-center justify-between">
             <span className="font-mono text-xs text-text-muted uppercase tracking-widest">
@@ -264,14 +249,12 @@ export default function StudentView({ sessionInfo, onLeave }) {
                 <span className="text-text-faint font-mono text-sm">Initializing camera…</span>
               </div>
             )}
-            {/* Name overlay */}
             <div className="absolute bottom-3 left-3 px-3 py-1 rounded-lg bg-surface/70 backdrop-blur-sm border border-surface-3">
               <span className="font-mono text-xs text-accent">{name}</span>
             </div>
           </div>
         </div>
 
-        {/* Screen share preview */}
         <div className="flex-1 flex flex-col gap-3">
           <div className="flex items-center justify-between">
             <span className="font-mono text-xs text-text-muted uppercase tracking-widest">
@@ -321,7 +304,6 @@ export default function StudentView({ sessionInfo, onLeave }) {
         </div>
       </main>
 
-      {/* Status bar */}
       <footer className="px-6 py-3 border-t border-surface-3 bg-surface-1 flex items-center justify-between">
         <div className="flex items-center gap-4">
           {status === STATUS.LOADING && (
@@ -333,13 +315,11 @@ export default function StudentView({ sessionInfo, onLeave }) {
               Initializing…
             </span>
           )}
-          {status === STATUS.CONNECTED && (
-            <span className="font-mono text-xs text-accent">
-              ✓ All systems operational
-            </span>
-          )}
           {status === STATUS.ERROR && (
             <span className="font-mono text-xs text-danger">✗ {error}</span>
+          )}
+          {status === STATUS.CONNECTED && (
+            <span className="font-mono text-xs text-accent">✓ Secure Connection Active</span>
           )}
         </div>
         <div className="flex items-center gap-4 font-mono text-xs text-text-muted">

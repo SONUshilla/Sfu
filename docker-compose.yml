@@ -4,9 +4,7 @@ services:
       context: ./server
       dockerfile: Dockerfile
     container_name: backend
-    ports:
-      - "5000:5000"
-      - "40000-49999:40000-49999/udp"
+    network_mode: "host"
     restart: unless-stopped
     env_file:
       - ./server/.env

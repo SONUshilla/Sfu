@@ -2,16 +2,11 @@ import { useRef, useCallback } from 'react';
 import { Device } from 'mediasoup-client';
 import socket from '../socket';
 
-/**
- * Core mediasoup-client hook.
- * Handles Device loading, transport creation, producing, and consuming.
- */
 export function useMediasoup() {
   const deviceRef = useRef(null);
   const sendTransportRef = useRef(null);
   const recvTransportRef = useRef(null);
 
-  // ── Load Device ─────────────────────────────────────────────────────────────
   const loadDevice = useCallback(async (routerRtpCapabilities) => {
     const device = new Device();
     await device.load({ routerRtpCapabilities });
@@ -19,7 +14,6 @@ export function useMediasoup() {
     return device;
   }, []);
 
-  // ── Create Send Transport (student → SFU) ───────────────────────────────────
   const createSendTransport = useCallback(() => {
     return new Promise((resolve, reject) => {
       socket.emit('createWebRtcTransport', { direction: 'send' }, (data) => {
@@ -32,7 +26,6 @@ export function useMediasoup() {
           dtlsParameters: data.dtlsParameters,
         });
 
-        // Connect fired once on first produce
         transport.on('connect', ({ dtlsParameters }, callback, errback) => {
           socket.emit(
             'connectTransport',
@@ -41,7 +34,6 @@ export function useMediasoup() {
           );
         });
 
-        // Produce event: server creates producer, returns producerId
         transport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
           socket.emit(
             'produce',
@@ -50,13 +42,20 @@ export function useMediasoup() {
           );
         });
 
+        // Catch silent ICE failures for Sender
+        transport.on('connectionstatechange', (state) => {
+          console.log(`[SendTransport] Connection state: ${state}`);
+          if (state === 'disconnected' || state === 'failed') {
+            console.error('Send transport connection dropped.');
+          }
+        });
+
         sendTransportRef.current = transport;
         resolve(transport);
       });
     });
   }, []);
 
-  // ── Create Recv Transport (SFU → proctor) ───────────────────────────────────
   const createRecvTransport = useCallback(() => {
     return new Promise((resolve, reject) => {
       socket.emit('createWebRtcTransport', { direction: 'recv' }, (data) => {
@@ -77,29 +76,34 @@ export function useMediasoup() {
           );
         });
 
+        // Catch silent ICE failures for Receiver and trigger restart
+        transport.on('connectionstatechange', (state) => {
+          console.log(`[RecvTransport] Connection state: ${state}`);
+          if (state === 'failed') {
+            console.error('Recv transport failed. Attempting to restart ICE...');
+            socket.emit('restartIce', { transportId: transport.id }, (res) => {
+               if(res.iceParameters) transport.restartIce({ iceParameters: res.iceParameters });
+            });
+          }
+        });
+
         recvTransportRef.current = transport;
         resolve(transport);
       });
     });
   }, []);
 
-// ── Produce a Track ──────────────────────────────────────────────────────────
   const produce = useCallback(async (track, options = {}) => {
     if (!sendTransportRef.current) throw new Error('Send transport not created');
-
-    // Separate the encodings from the rest of your appData (like mediaType)
     const { encodings, ...appData } = options;
-
-    const producer = await sendTransportRef.current.produce({ 
+    
+    return await sendTransportRef.current.produce({ 
       track, 
-      encodings, // <── This applies the 100kbps bitrate limit
-      appData    // <── This keeps your { mediaType: 'webcam' } intact
+      encodings, 
+      appData 
     });
-
-    return producer;
   }, []);
 
-  // ── Consume a Remote Producer ────────────────────────────────────────────────
   const consume = useCallback((producerId) => {
     return new Promise((resolve, reject) => {
       if (!deviceRef.current?.rtpCapabilities) return reject(new Error('Device not loaded'));
@@ -121,23 +125,12 @@ export function useMediasoup() {
             rtpParameters: data.rtpParameters,
           });
 
-          // Resume (server starts paused to avoid packet loss before client is ready)
           socket.emit('resumeConsumer', { consumerId: consumer.id }, () => {});
-
           resolve(consumer);
         }
       );
     });
   }, []);
 
-  return {
-    deviceRef,
-    sendTransportRef,
-    recvTransportRef,
-    loadDevice,
-    createSendTransport,
-    createRecvTransport,
-    produce,
-    consume,
-  };
+  return { loadDevice, createSendTransport, createRecvTransport, produce, consume };
 }

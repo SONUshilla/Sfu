@@ -2,9 +2,6 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import socket from '../socket';
 import { useMediasoup } from '../hooks/useMediasoup';
 
-/**
- * ─── CONSTANTS & CONFIG ──────────────────────────────────────────────────────
- */
 const ROLES = [
   {
     id: 'student',
@@ -20,10 +17,6 @@ const ROLES = [
   }
 ];
 
-/**
- * ─── SHARED SUB-COMPONENTS ───────────────────────────────────────────────────
- */
-
 function AudioMeter({ stream }) {
   const [bars, setBars] = useState([false, false, false, false, false]);
   const rafRef = useRef(null);
@@ -33,6 +26,12 @@ function AudioMeter({ stream }) {
     if (!stream || stream.getAudioTracks().length === 0) return;
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      
+      // Auto-play policy warning
+      if (ctx.state === 'suspended') {
+        console.warn('AudioContext is suspended. Requires user interaction to resume.');
+      }
+
       ctxRef.current = ctx;
       const src = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
@@ -49,9 +48,12 @@ function AudioMeter({ stream }) {
       };
       tick();
     } catch (e) { console.warn("AudioMeter context error", e); }
+    
     return () => {
       cancelAnimationFrame(rafRef.current);
-      if (ctxRef.current) ctxRef.current.close();
+      if (ctxRef.current && ctxRef.current.state !== 'closed') {
+        ctxRef.current.close();
+      }
     };
   }, [stream]);
 
@@ -68,9 +70,6 @@ function AudioMeter({ stream }) {
   );
 }
 
-/**
- * ─── JOIN VIEW ───────────────────────────────────────────────────────────────
- */
 export function JoinView({ onJoin }) {
   const [role, setRole] = useState('student');
   const [name, setName] = useState('');
@@ -152,9 +151,6 @@ export function JoinView({ onJoin }) {
   );
 }
 
-/**
- * ─── PROCTOR VIEW ────────────────────────────────────────────────────────────
- */
 export default function ProctorView({ sessionInfo, onLeave }) {
   const { name, sessionId } = sessionInfo;
   const [students, setStudents] = useState(new Map());
@@ -173,17 +169,14 @@ export default function ProctorView({ sessionInfo, onLeave }) {
       studentsRef.current.set(peerId, {
         peerId, name: name || 'Unknown',
         webcamStream: new MediaStream(),
-        hasVideo: false, hasAudio: false, isActive: false,
-        consumers: new Map(),
-        flags: [],
+        hasVideo: false, hasAudio: false, isActive: false, isPaused: false,
+        consumers: new Map(), flags: [],
       });
     }
     return studentsRef.current.get(peerId);
   };
 
   const consumeProducer = useCallback(async ({ peerId, producerId, peerName, kind, mediaType }) => {
-    
-    // STRIC FILTER: Ignore screenshares
     if (mediaType === 'screen') return; 
 
     try {
@@ -195,6 +188,7 @@ export default function ProctorView({ sessionInfo, onLeave }) {
       if (kind === 'video') student.hasVideo = true;
       if (kind === 'audio') student.hasAudio = true;
       student.isActive = true;
+      student.isPaused = false; 
       sync();
 
       consumer.on('trackended', () => {
@@ -233,7 +227,6 @@ export default function ProctorView({ sessionInfo, onLeave }) {
 
     init();
 
-    // ── NEW: Cleanup Handlers for Ghost Tiles ──
     const onConsumerClosed = ({ consumerId }) => {
       for (const [, s] of studentsRef.current) {
         const c = s.consumers.get(consumerId);
@@ -243,25 +236,25 @@ export default function ProctorView({ sessionInfo, onLeave }) {
           if (c.kind === 'video') s.hasVideo = false;
           if (c.kind === 'audio') s.hasAudio = false;
           if (s.consumers.size === 0) s.isActive = false;
-          sync(); 
-          break;
+          sync(); break;
         }
       }
     };
 
-    const onProducerClosed = ({ producerId }) => {
-      // Sometimes the backend fires producerClosed instead of consumerClosed
+    const onConsumerPaused = ({ consumerId }) => {
       for (const [, s] of studentsRef.current) {
-        for (const [consumerId, c] of s.consumers) {
-          if (c.producerId === producerId) {
-            s.webcamStream.removeTrack(c.track);
-            s.consumers.delete(consumerId);
-            if (c.kind === 'video') s.hasVideo = false;
-            if (c.kind === 'audio') s.hasAudio = false;
-            if (s.consumers.size === 0) s.isActive = false;
-            sync();
-            return;
-          }
+        if (s.consumers.has(consumerId)) {
+          s.isPaused = true;
+          sync(); break;
+        }
+      }
+    };
+
+    const onConsumerResumed = ({ consumerId }) => {
+      for (const [, s] of studentsRef.current) {
+        if (s.consumers.has(consumerId)) {
+          s.isPaused = false;
+          sync(); break;
         }
       }
     };
@@ -269,38 +262,28 @@ export default function ProctorView({ sessionInfo, onLeave }) {
     const onPeerLeft = ({ peerId }) => {
       const s = studentsRef.current.get(peerId);
       if (s) { 
-        s.isActive = false; 
-        s.hasVideo = false; 
-        s.hasAudio = false;
+        s.isActive = false; s.hasVideo = false; s.hasAudio = false; s.isPaused = false;
         sync(); 
       }
     };
 
     socket.on('newProducer', consumeProducer);
     socket.on('consumerClosed', onConsumerClosed);
-    socket.on('producerClosed', onProducerClosed);
-    socket.on('peerJoined', ({ peerId, name, role }) => {
-      if (role === 'student') { getOrCreate(peerId, name); sync(); }
-    });
+    socket.on('consumerPaused', onConsumerPaused);
+    socket.on('consumerResumed', onConsumerResumed);
+    socket.on('peerJoined', ({ peerId, name, role }) => { if (role === 'student') { getOrCreate(peerId, name); sync(); }});
     socket.on('peerLeft', onPeerLeft);
-    socket.on('studentFlagged', ({ studentId, flag }) => {
-      const s = studentsRef.current.get(studentId);
-      if (s) { s.flags = [...(s.flags || []), flag]; sync(); }
-    });
+    socket.on('disconnect', () => setStatus('Disconnected from server'));
 
     return () => {
       mounted = false;
-      socket.off('newProducer');
-      socket.off('consumerClosed');
-      socket.off('producerClosed');
-      socket.off('peerJoined');
-      socket.off('peerLeft');
-      socket.off('studentFlagged');
+      socket.off('newProducer'); socket.off('consumerClosed');
+      socket.off('consumerPaused'); socket.off('consumerResumed');
+      socket.off('peerJoined'); socket.off('peerLeft'); socket.off('disconnect');
       socket.disconnect();
     };
   }, [consumeProducer, createRecvTransport, loadDevice, name, sessionId]);
 
-  // ── FILTER: Only render tiles if the student is actively sending media ──
   const activeStudents = Array.from(students.values()).filter(s => s.isActive || s.hasVideo || s.hasAudio);
 
   return (
@@ -309,9 +292,10 @@ export default function ProctorView({ sessionInfo, onLeave }) {
         <div className="flex items-center gap-3">
           <span className="font-mono text-xs text-accent">ProctorSFU</span>
           <span className="font-mono text-xs text-text-muted">ID: {sessionId}</span>
+          <span className="font-mono text-xs text-text-muted">Status: {status}</span>
         </div>
         <div className="flex items-center gap-3">
-          <button onClick={() => setMuted(!muted)} className="p-2 border border-surface-4 rounded-lg">{muted ? '🔇' : '🔊'}</button>
+          <button onClick={() => setMuted(!muted)} className="p-2 border border-surface-4 rounded-lg text-white">{muted ? '🔇 Unmute All' : '🔊 Mute All'}</button>
           <button onClick={onLeave} className="px-3 py-1.5 bg-danger/10 text-danger border border-danger/20 rounded-lg text-xs">Leave</button>
         </div>
       </header>
@@ -339,42 +323,47 @@ export default function ProctorView({ sessionInfo, onLeave }) {
 function StudentTile({ student, muted, onFlag }) {
   const videoRef = useRef(null);
   
-  // 1. Attach the stream to the video element
   useEffect(() => {
-    if (videoRef.current && student.webcamStream) {
+    if (videoRef.current && student.webcamStream && student.webcamStream.getTracks().length > 0) {
       videoRef.current.srcObject = student.webcamStream;
+      
+      const playPromise = videoRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(error => {
+          console.warn(`Autoplay prevented for ${student.name}:`, error);
+        });
+      }
     }
   }, [student.webcamStream]);
 
-  // 2. React to the Proctor clicking the Mute/Unmute button
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.muted = muted;
-    }
+    if (videoRef.current) videoRef.current.muted = muted;
   }, [muted]);
 
   return (
     <div className="bg-surface-2 border border-surface-4 rounded-xl overflow-hidden relative">
       <div className="aspect-video bg-black relative">
-        
-        {/* Notice that 'muted' is completely removed from this video tag! */}
         <video 
           ref={videoRef} 
-          autoPlay 
           playsInline 
-          className="w-full h-full object-cover" 
+          className={`w-full h-full object-cover transition-opacity ${student.isPaused ? 'opacity-30' : 'opacity-100'}`} 
         />
         
-        <div className="absolute top-2 left-2 flex gap-1">
+        <div className="absolute top-2 left-2 flex flex-col gap-1">
           <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono ${student.isActive ? 'bg-accent/20 text-accent' : 'bg-surface/60 text-muted'}`}>
             {student.isActive ? 'LIVE' : 'OFFLINE'}
           </span>
+          {student.isPaused && (
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-warn/20 text-warn animate-pulse">
+              Buffering (Network)
+            </span>
+          )}
         </div>
         <div className="absolute top-2 right-2"><AudioMeter stream={student.webcamStream} /></div>
       </div>
       <div className="p-3 flex justify-between items-center">
         <span className="text-sm font-medium">{student.name}</span>
-        <button onClick={() => onFlag(student.peerId, student.name)} className="text-[10px] font-mono text-warn border border-warn/30 px-2 py-1 rounded">⚑ FLAG</button>
+        <button onClick={() => onFlag(student.peerId, student.name)} className="text-[10px] font-mono text-warn border border-warn/30 px-2 py-1 rounded hover:bg-warn/10">⚑ FLAG</button>
       </div>
     </div>
   );
@@ -394,7 +383,7 @@ function FlagModal({ target, onClose, onSubmit }) {
         </select>
         <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Reason..." className="w-full p-2 bg-surface-1 border border-surface-4 rounded-lg text-sm text-text mb-4" />
         <div className="flex gap-2">
-          <button onClick={onClose} className="flex-1 py-2 border border-surface-4 rounded-xl text-sm">Cancel</button>
+          <button onClick={onClose} className="flex-1 py-2 border border-surface-4 rounded-xl text-sm text-text">Cancel</button>
           <button onClick={() => { onSubmit(target.peerId, note, severity); onClose(); }} className="flex-1 py-2 bg-warn/20 text-warn border border-warn/40 rounded-xl text-sm">Submit</button>
         </div>
       </div>

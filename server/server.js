@@ -1,14 +1,12 @@
 'use strict';
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const mediasoup = require('mediasoup');
-const cors = require('cors');
+import express from "express";
+import http from 'http';
+import { Server } from 'socket.io';
+import mediasoup from 'mediasoup';
+import cors from 'cors';
 import dotenv from 'dotenv';
 dotenv.config();
 
-
-// ─── App Setup ────────────────────────────────────────────────────────────────
 const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
@@ -16,9 +14,10 @@ app.use(express.json());
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
+  pingTimeout: 10000, 
+  pingInterval: 5000,
 });
 
-// ─── Mediasoup Config ─────────────────────────────────────────────────────────
 const MEDIA_CODECS = [
   { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 },
   { kind: 'video', mimeType: 'video/VP8',  clockRate: 90000, parameters: { 'x-google-start-bitrate': 1000 } },
@@ -29,7 +28,7 @@ const MEDIA_CODECS = [
   },
 ];
 
-const ANNOUNCED_IP = process.env.ANNOUNCED_IP || '3.70.42.97';
+const ANNOUNCED_IP = process.env.ANNOUNCED_IP || '127.0.0.1'; // Change to your public server IP
 const RTC_MIN_PORT = parseInt(process.env.RTC_MIN_PORT || '40000');
 const RTC_MAX_PORT = parseInt(process.env.RTC_MAX_PORT || '49999');
 
@@ -42,24 +41,9 @@ const WEBRTC_TRANSPORT_OPTIONS = {
   minimumAvailableOutgoingBitrate: 600_000,
 };
 
-// ─── State ────────────────────────────────────────────────────────────────────
 let worker = null;
-
-/**
- * rooms: Map<sessionId, Room>
- *
- * Room = {
- * router      : mediasoup.Router
- * peers       : Map<socketId, Peer>
- * flags       : Map<studentId, Flag[]>
- * }
- *
- * Peer = { id, name, role, sessionId, transports, producers, consumers }
- * Flag = { flagId, proctorId, proctorName, studentName, note, ts }
- */
 const rooms = new Map();
 
-// ─── Worker ───────────────────────────────────────────────────────────────────
 async function createWorker() {
   const w = await mediasoup.createWorker({
     logLevel: 'warn',
@@ -74,6 +58,12 @@ async function createWorker() {
 async function getOrCreateRoom(sessionId) {
   if (!rooms.has(sessionId)) {
     const router = await worker.createRouter({ mediaCodecs: MEDIA_CODECS });
+    
+    router.observer.on('close', () => {
+       console.log(`Router for room ${sessionId} closed`);
+       rooms.delete(sessionId);
+    });
+
     rooms.set(sessionId, {
       router,
       peers: new Map(),
@@ -93,7 +83,6 @@ function cleanupRoom(sessionId) {
   }
 }
 
-// ─── Room Helpers ─────────────────────────────────────────────────────────────
 function emitToRole(room, role, event, data) {
   for (const [, p] of room.peers) {
     if (p.role === role) io.to(p.id).emit(event, data);
@@ -108,22 +97,18 @@ function buildFlagsPayload(room) {
   return result;
 }
 
-// ─── Socket.io ────────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log(`[${socket.id}] connected`);
 
   let room = null;
   let peer = null;
 
-  // ── join ──────────────────────────────────────────────────────────────────
   socket.on('join', async ({ sessionId, role, name }, cb) => {
     try {
       room = await getOrCreateRoom(sessionId);
       peer = {
         id: socket.id, name, role, sessionId,
-        transports: new Map(),
-        producers: new Map(),
-        consumers: new Map(),
+        transports: new Map(), producers: new Map(), consumers: new Map(),
       };
       room.peers.set(socket.id, peer);
       socket.join(sessionId);
@@ -131,7 +116,6 @@ io.on('connection', (socket) => {
       console.log(`[${socket.id}] join role=${role} name="${name}" session=${sessionId}`);
       socket.to(sessionId).emit('peerJoined', { peerId: socket.id, name, role });
 
-      // Existing producers: proctors get all student producers (except screen sharing)
       let existingProducers = [];
       if (role === 'proctor') {
         for (const [peerId, p] of room.peers) {
@@ -161,11 +145,12 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── createWebRtcTransport ─────────────────────────────────────────────────
   socket.on('createWebRtcTransport', async ({ direction }, cb) => {
     try {
       const transport = await room.router.createWebRtcTransport(WEBRTC_TRANSPORT_OPTIONS);
       transport.on('dtlsstatechange', (s) => { if (s === 'closed') transport.close(); });
+      transport.observer.on('close', () => peer.transports.delete(transport.id));
+
       peer.transports.set(transport.id, transport);
       cb({
         ok: true,
@@ -177,7 +162,6 @@ io.on('connection', (socket) => {
     } catch (err) { cb({ ok: false, error: err.message }); }
   });
 
-  // ── connectTransport ──────────────────────────────────────────────────────
   socket.on('connectTransport', async ({ transportId, dtlsParameters }, cb) => {
     try {
       const t = peer.transports.get(transportId);
@@ -187,7 +171,15 @@ io.on('connection', (socket) => {
     } catch (err) { cb({ ok: false, error: err.message }); }
   });
 
-  // ── produce ───────────────────────────────────────────────────────────────
+  socket.on('restartIce', async ({ transportId }, cb) => {
+    try {
+      const t = peer.transports.get(transportId);
+      if (!t) throw new Error('Transport not found');
+      const iceParameters = await t.restartIce();
+      cb({ ok: true, iceParameters });
+    } catch (err) { cb({ ok: false, error: err.message }); }
+  });
+
   socket.on('produce', async ({ transportId, kind, rtpParameters, appData }, cb) => {
     try {
       const transport = peer.transports.get(transportId);
@@ -195,25 +187,21 @@ io.on('connection', (socket) => {
 
       const producer = await transport.produce({ kind, rtpParameters, appData });
       peer.producers.set(producer.id, producer);
-      producer.on('transportclose', () => peer.producers.delete(producer.id));
+      producer.on('transportclose', () => producer.close());
 
       console.log(`[${socket.id}] produce kind=${kind} mediaType=${appData.mediaType} id=${producer.id}`);
 
-      const payload = {
-        peerId: socket.id, producerId: producer.id, peerName: peer.name,
-        mediaType: appData.mediaType, kind,
-      };
-
-      // Broadcast new producers (except screen sharing) to all proctors
       if (appData.mediaType !== 'screen') {
-        emitToRole(room, 'proctor', 'newProducer', payload);
+        emitToRole(room, 'proctor', 'newProducer', {
+          peerId: socket.id, producerId: producer.id, peerName: peer.name,
+          mediaType: appData.mediaType, kind,
+        });
       }
 
       cb({ ok: true, producerId: producer.id });
     } catch (err) { cb({ ok: false, error: err.message }); }
   });
 
-  // ── producerClosed ────────────────────────────────────────────────────────
   socket.on('producerClosed', ({ producerId }) => {
     const producer = peer?.producers?.get(producerId);
     if (producer) {
@@ -223,7 +211,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── consume ───────────────────────────────────────────────────────────────
   socket.on('consume', async ({ transportId, producerId, rtpCapabilities }, cb) => {
     try {
       if (!room.router.canConsume({ producerId, rtpCapabilities })) {
@@ -235,11 +222,12 @@ io.on('connection', (socket) => {
       const consumer = await transport.consume({ producerId, rtpCapabilities, paused: true });
       peer.consumers.set(consumer.id, consumer);
 
-      consumer.on('transportclose', () => peer.consumers.delete(consumer.id));
+      consumer.on('transportclose', () => consumer.close());
       consumer.on('producerclose', () => {
         peer.consumers.delete(consumer.id);
         socket.emit('consumerClosed', { consumerId: consumer.id });
       });
+      
       consumer.on('producerpause',  () => socket.emit('consumerPaused',  { consumerId: consumer.id }));
       consumer.on('producerresume', () => socket.emit('consumerResumed', { consumerId: consumer.id }));
 
@@ -253,7 +241,6 @@ io.on('connection', (socket) => {
     } catch (err) { cb({ ok: false, error: err.message }); }
   });
 
-  // ── resumeConsumer ────────────────────────────────────────────────────────
   socket.on('resumeConsumer', async ({ consumerId }, cb) => {
     try {
       const consumer = peer.consumers.get(consumerId);
@@ -263,7 +250,6 @@ io.on('connection', (socket) => {
     } catch (err) { cb({ ok: false, error: err.message }); }
   });
 
-  // ── flagStudent ───────────────────────────────────────────────────────────
   socket.on('flagStudent', ({ studentId, note, severity }, cb) => {
     try {
       if (peer.role !== 'proctor') throw new Error('Not authorized');
@@ -271,25 +257,19 @@ io.on('connection', (socket) => {
       if (!room.flags.has(studentId)) room.flags.set(studentId, []);
       const flag = {
         flagId: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        proctorId: socket.id,
-        proctorName: peer.name,
+        proctorId: socket.id, proctorName: peer.name,
         studentName: room.peers.get(studentId)?.name || 'Unknown',
-        note: note || '',
-        severity: severity || 'warning',
-        ts: Date.now(),
+        note: note || '', severity: severity || 'warning', ts: Date.now(),
       };
       room.flags.get(studentId).push(flag);
 
       console.log(`[proctor ${peer.name}] flagged student=${studentId} severity=${flag.severity}`);
-
-      // Broadcast to other proctors so they see the flag too
       emitToRole(room, 'proctor', 'studentFlagged', { studentId, flag });
 
       cb({ ok: true, flag });
     } catch (err) { cb({ ok: false, error: err.message }); }
   });
 
-  // ── disconnect ────────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
     console.log(`[${socket.id}] disconnected`);
     if (!room || !peer) return;
@@ -306,12 +286,8 @@ io.on('connection', (socket) => {
   });
 });
 
-// ─── Health ───────────────────────────────────────────────────────────────────
-app.get('/health', (_, res) =>
-  res.json({ status: 'ok', rooms: rooms.size, pid: process.pid })
-);
+app.get('/health', (_, res) => res.json({ status: 'ok', rooms: rooms.size, pid: process.pid }));
 
-// ─── Boot ─────────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '3001');
 
 (async () => {
