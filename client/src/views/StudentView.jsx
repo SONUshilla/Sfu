@@ -55,7 +55,19 @@ export default function StudentView({ sessionInfo, onLeave }) {
         if (!mounted) return;
 
         await loadDevice(joinData.routerRtpCapabilities);
-        await createSendTransport();
+        await createSendTransport(() => {
+          if (!mounted) return;
+          console.error("Transport unrecoverable. Forcing UI error state.");
+          setError(
+            "Connection permanently lost. Please click Leave and rejoin.",
+          );
+          setStatus(STATUS.ERROR);
+
+          // Optional: Stop local tracks immediately so the user knows it's dead
+          webcamStreamRef.current?.getTracks().forEach((t) => t.stop());
+          screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+          setTracks({ webcam: false, audio: false, screen: false });
+        });
 
         const camStream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },

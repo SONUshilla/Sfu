@@ -14,7 +14,20 @@ export function useMediasoup() {
     return device;
   }, []);
 
-  const createSendTransport = useCallback(() => {
+  // Shared ICE restart logic
+  const restartIce = useCallback((transport) => {
+    if (!transport || transport.closed) return;
+    socket.emit('restartIce', { transportId: transport.id }, (res) => {
+      if (res?.iceParameters) {
+        transport.restartIce({ iceParameters: res.iceParameters })
+          .catch((err) => console.error(`[${transport.direction}] ICE restart failed:`, err));
+      } else {
+        console.warn(`[${transport.direction}] restartIce: no iceParameters returned`);
+      }
+    });
+  }, []);
+
+  const createSendTransport = useCallback((onDropped) => {
     return new Promise((resolve, reject) => {
       socket.emit('createWebRtcTransport', { direction: 'send' }, (data) => {
         if (!data.ok) return reject(new Error(data.error));
@@ -42,11 +55,32 @@ export function useMediasoup() {
           );
         });
 
-        // Catch silent ICE failures for Sender
+        let iceRestartAttempts = 0;
+        const MAX_ICE_RESTARTS = 3;
+
         transport.on('connectionstatechange', (state) => {
-          console.log(`[SendTransport] Connection state: ${state}`);
-          if (state === 'disconnected' || state === 'failed') {
-            console.error('Send transport connection dropped.');
+          console.log(`[SendTransport] State: ${state}`);
+
+          if (state === 'disconnected') {
+            // Temporary blip — try ICE restart first
+            console.warn('[SendTransport] Disconnected, attempting ICE restart...');
+            restartIce(transport);
+          }
+
+          if (state === 'failed') {
+            if (iceRestartAttempts < MAX_ICE_RESTARTS) {
+              iceRestartAttempts++;
+              console.warn(`[SendTransport] Failed — ICE restart attempt ${iceRestartAttempts}/${MAX_ICE_RESTARTS}`);
+              restartIce(transport);
+            } else {
+              console.error('[SendTransport] Max ICE restarts reached — escalating to full reconnect');
+              iceRestartAttempts = 0;
+              onDropped?.(); // signal StudentView to do full reconnect
+            }
+          }
+
+          if (state === 'connected') {
+            iceRestartAttempts = 0; // reset on recovery
           }
         });
 
@@ -54,7 +88,7 @@ export function useMediasoup() {
         resolve(transport);
       });
     });
-  }, []);
+  }, [restartIce]);
 
   const createRecvTransport = useCallback(() => {
     return new Promise((resolve, reject) => {
@@ -76,14 +110,30 @@ export function useMediasoup() {
           );
         });
 
-        // Catch silent ICE failures for Receiver and trigger restart
+        let iceRestartAttempts = 0;
+        const MAX_ICE_RESTARTS = 3;
+
         transport.on('connectionstatechange', (state) => {
-          console.log(`[RecvTransport] Connection state: ${state}`);
+          console.log(`[RecvTransport] State: ${state}`);
+
+          if (state === 'disconnected') {
+            console.warn('[RecvTransport] Disconnected, attempting ICE restart...');
+            restartIce(transport);
+          }
+
           if (state === 'failed') {
-            console.error('Recv transport failed. Attempting to restart ICE...');
-            socket.emit('restartIce', { transportId: transport.id }, (res) => {
-               if(res.iceParameters) transport.restartIce({ iceParameters: res.iceParameters });
-            });
+            if (iceRestartAttempts < MAX_ICE_RESTARTS) {
+              iceRestartAttempts++;
+              console.warn(`[RecvTransport] Failed — ICE restart attempt ${iceRestartAttempts}/${MAX_ICE_RESTARTS}`);
+              restartIce(transport);
+            } else {
+              console.error('[RecvTransport] Max ICE restarts reached — transport unrecoverable');
+              iceRestartAttempts = 0;
+            }
+          }
+
+          if (state === 'connected') {
+            iceRestartAttempts = 0;
           }
         });
 
@@ -91,17 +141,12 @@ export function useMediasoup() {
         resolve(transport);
       });
     });
-  }, []);
+  }, [restartIce]);
 
   const produce = useCallback(async (track, options = {}) => {
     if (!sendTransportRef.current) throw new Error('Send transport not created');
     const { encodings, ...appData } = options;
-    
-    return await sendTransportRef.current.produce({ 
-      track, 
-      encodings, 
-      appData 
-    });
+    return await sendTransportRef.current.produce({ track, encodings, appData });
   }, []);
 
   const consume = useCallback((producerId) => {
