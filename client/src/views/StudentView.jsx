@@ -98,11 +98,14 @@ export default function StudentView({ sessionInfo, onLeave }) {
 
         producersRef.current.webcam = await produce(videoTrack, {
           mediaType: "webcam",
-          encodings: [{ maxBitrate: 200000 }], 
+          encodings: [{ maxBitrate: 100000 }], 
         });
         if (mounted) setTracks((t) => ({ ...t, webcam: true }));
 
-        producersRef.current.audio = await produce(audioTrack, { mediaType: 'audio' });
+        producersRef.current.audio = await produce(audioTrack, {
+          mediaType: "audio",
+          encodings: [{ maxBitrate: 64000 }], // 64 kbps
+        });
         if (mounted) setTracks((t) => ({ ...t, audio: true }));
 
         if (mounted) setStatus(STATUS.CONNECTED);
@@ -133,7 +136,7 @@ export default function StudentView({ sessionInfo, onLeave }) {
 
         producersRef.current.screen = await produce(screenTrack, {
           mediaType: "screen",
-          encodings: [{ maxBitrate: 300000 }],
+          encodings: [{ maxBitrate: 100000 }],
         });
         if (mounted) setTracks((t) => ({ ...t, screen: true }));
       } catch (e) {
