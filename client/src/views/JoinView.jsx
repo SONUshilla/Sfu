@@ -12,7 +12,7 @@ const ROLES = [
     id: 'proctor',
     icon: '👁',
     label: 'Proctor',
-    desc: 'Monitor assigned students via webcam and audio.',
+    desc: 'Monitor assigned students via webcam and audio no screen.',
     accent: 'accent',
   }
 ];
