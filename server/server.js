@@ -148,7 +148,16 @@ io.on('connection', (socket) => {
   socket.on('createWebRtcTransport', async ({ direction }, cb) => {
     try {
       const transport = await room.router.createWebRtcTransport(WEBRTC_TRANSPORT_OPTIONS);
-      transport.on('dtlsstatechange', (s) => { if (s === 'closed') transport.close(); });
+      // Only close on DTLS failed, not closed
+      // And only if ICE is also in a terminal state
+      transport.on('dtlsstatechange', (state) => {
+        console.log(`[Transport ${transport.id}] DTLS state: ${state}`);
+        if (state === 'failed') {
+          console.warn(`Transport ${transport.id} DTLS failed — closing`);
+          transport.close();
+        }
+        // Don't close on 'closed' — mediasoup handles that internally
+      });
       transport.observer.on('close', () => peer.transports.delete(transport.id));
 
       peer.transports.set(transport.id, transport);
@@ -173,11 +182,16 @@ io.on('connection', (socket) => {
 
   socket.on('restartIce', async ({ transportId }, cb) => {
     try {
+      if (!peer) throw new Error('Peer not found');           // ← add this
       const t = peer.transports.get(transportId);
       if (!t) throw new Error('Transport not found');
+      if (t.closed) throw new Error('Transport already closed'); // ← add this
       const iceParameters = await t.restartIce();
       cb({ ok: true, iceParameters });
-    } catch (err) { cb({ ok: false, error: err.message }); }
+    } catch (err) {
+      console.error('restartIce error:', err.message);
+      cb({ ok: false, error: err.message });
+    }
   });
 
   socket.on('produce', async ({ transportId, kind, rtpParameters, appData }, cb) => {
