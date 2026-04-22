@@ -2,19 +2,37 @@ import { useRef, useCallback } from 'react';
 import { Device } from 'mediasoup-client';
 import socket from '../socket';
 
+// Default ICE servers used if none are provided externally
+const DEFAULT_ICE_SERVERS = [{
+  urls: [
+    'stun:stun.relay.metered.ca:80',
+    'turn:global.relay.metered.ca:80',
+    'turn:global.relay.metered.ca:80?transport=tcp',
+    'turn:global.relay.metered.ca:443',
+    'turns:global.relay.metered.ca:443?transport=tcp'
+  ],
+  username: 'openrelayproject',
+  credential: 'openrelayproject'
+}];
+
 export function useMediasoup() {
   const deviceRef = useRef(null);
   const sendTransportRef = useRef(null);
   const recvTransportRef = useRef(null);
+  // Store the active iceServers (can be overridden on loadDevice)
+  const iceServersRef = useRef(DEFAULT_ICE_SERVERS);
 
-  const loadDevice = useCallback(async (routerRtpCapabilities) => {
+  const loadDevice = useCallback(async (routerRtpCapabilities, customIceServers = null) => {
+    // Use custom if provided, otherwise keep existing (or default)
+    const iceServers = customIceServers ?? iceServersRef.current;
+    iceServersRef.current = iceServers;
+
     const device = new Device();
-    await device.load({ routerRtpCapabilities });
+    await device.load({ routerRtpCapabilities, iceServers });
     deviceRef.current = device;
     return device;
   }, []);
 
-  // Shared ICE restart logic
   const restartIce = useCallback((transport) => {
     if (!transport || transport.closed) return;
     socket.emit('restartIce', { transportId: transport.id }, (res) => {
@@ -37,8 +55,10 @@ export function useMediasoup() {
           iceParameters: data.iceParameters,
           iceCandidates: data.iceCandidates,
           dtlsParameters: data.dtlsParameters,
+          iceServers: iceServersRef.current,   // 👈 use the stored value
         });
 
+        // ... rest unchanged
         transport.on('connect', ({ dtlsParameters }, callback, errback) => {
           socket.emit(
             'connectTransport',
@@ -62,7 +82,6 @@ export function useMediasoup() {
           console.log(`[SendTransport] State: ${state}`);
 
           if (state === 'disconnected') {
-            // Temporary blip — try ICE restart first
             console.warn('[SendTransport] Disconnected, attempting ICE restart...');
             restartIce(transport);
           }
@@ -75,12 +94,12 @@ export function useMediasoup() {
             } else {
               console.error('[SendTransport] Max ICE restarts reached — escalating to full reconnect');
               iceRestartAttempts = 0;
-              onDropped?.(); // signal StudentView to do full reconnect
+              onDropped?.();
             }
           }
 
           if (state === 'connected') {
-            iceRestartAttempts = 0; // reset on recovery
+            iceRestartAttempts = 0;
           }
         });
 
@@ -100,8 +119,10 @@ export function useMediasoup() {
           iceParameters: data.iceParameters,
           iceCandidates: data.iceCandidates,
           dtlsParameters: data.dtlsParameters,
+          iceServers: iceServersRef.current,   // 👈 use the stored value
         });
 
+        // ... rest unchanged
         transport.on('connect', ({ dtlsParameters }, callback, errback) => {
           socket.emit(
             'connectTransport',
